@@ -1,0 +1,175 @@
+import AVFoundation
+import CoreTransferable
+import MediaIntelligence
+import Photos
+import PhotosUI
+import SwiftUI
+import UniformTypeIdentifiers
+
+struct ImportedVideo: Transferable, Sendable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .movie) { received in
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ClipThing-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let destination = directory.appendingPathComponent("source")
+                .appendingPathExtension(received.file.pathExtension)
+            do {
+                try FileManager.default.copyItem(at: received.file, to: destination)
+                return ImportedVideo(url: destination)
+            } catch {
+                try? FileManager.default.removeItem(at: directory)
+                throw error
+            }
+        }
+    }
+}
+
+struct HighlightClip: Identifiable {
+    let id = UUID()
+    let url: URL
+    let start: Double
+    let duration: Double
+}
+
+@MainActor
+final class HighlightModel: ObservableObject {
+    @Published private(set) var clips: [HighlightClip] = []
+    @Published private(set) var isBusy = false
+    @Published private(set) var canCancel = false
+    @Published private(set) var status = "Choose a video. Get its best moments."
+    @Published var errorMessage: String?
+
+    private var job: Task<Void, Never>?
+    private var workingDirectory: URL?
+
+    func process(_ selection: PhotosPickerItem) {
+        guard !isBusy else { return }
+        cleanUp()
+        errorMessage = nil
+        isBusy = true
+        canCancel = true
+        status = "Loading video…"
+        job = Task {
+            defer { isBusy = false; canCancel = false; job = nil }
+            do {
+                guard let video = try await selection.loadTransferable(type: ImportedVideo.self) else {
+                    throw ClipError.importFailed
+                }
+                workingDirectory = video.url.deletingLastPathComponent()
+                try Task.checkCancellation()
+                status = "Finding highlights…"
+                let asset = MediaIntelligenceVideoAsset(
+                    id: MediaIntelligenceVideoAsset.ID(UUID().uuidString),
+                    kind: .url(video.url)
+                )
+                let result = try await VideoAnalyzer.shared.analyze(asset, for: HighlightAnalysisRequest())
+                let analysis = try result.get()
+                try Task.checkCancellation()
+                let source = AVURLAsset(url: video.url)
+                let duration = try await source.load(.duration)
+                let bounds = CMTimeRange(start: .zero, duration: duration)
+                // Clamp to the source and merge overlaps so the same footage isn't exported twice.
+                let ranges = Self.normalized(analysis.highlights, within: bounds)
+                guard !ranges.isEmpty else {
+                    status = "No highlights found. Try another video."
+                    cleanUp()
+                    return
+                }
+                for (index, range) in ranges.enumerated() {
+                    try Task.checkCancellation()
+                    status = "Preparing clip \(index + 1) of \(ranges.count)…"
+                    let url = video.url.deletingLastPathComponent()
+                        .appendingPathComponent("Highlight-\(index + 1).mov")
+                    // Passthrough avoids re-encoding when the source supports it.
+                    let presets = AVAssetExportSession.exportPresets(compatibleWith: source)
+                    let preset = presets.contains(AVAssetExportPresetPassthrough)
+                        ? AVAssetExportPresetPassthrough : AVAssetExportPresetHighestQuality
+                    guard let exporter = AVAssetExportSession(asset: source, presetName: preset) else {
+                        throw ClipError.exportFailed
+                    }
+                    exporter.timeRange = range
+                    try await exporter.export(to: url, as: .mov)
+                    try Task.checkCancellation()
+                    clips.append(HighlightClip(url: url, start: range.start.seconds, duration: range.duration.seconds))
+                }
+                try? FileManager.default.removeItem(at: video.url)
+                status = "\(clips.count) highlight\(clips.count == 1 ? "" : "s") ready"
+            } catch {
+                let cancelled = Task.isCancelled || error is CancellationError
+                cleanUp()
+                status = cancelled ? "Cancelled. Choose a video to start again." : "Try another video."
+                if !cancelled { errorMessage = error.localizedDescription }
+            }
+        }
+    }
+
+    func cancel() {
+        guard canCancel, job != nil else { return }
+        canCancel = false
+        status = "Cancelling…"
+        job?.cancel()
+        // Keep the gate closed until the underlying operation has actually stopped.
+    }
+
+    func save(_ selected: [HighlightClip]) {
+        guard !isBusy, !selected.isEmpty else { return }
+        isBusy = true
+        status = "Saving to Photos…"
+        job = Task {
+            defer { isBusy = false; job = nil }
+            do {
+                let permission = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+                guard permission == .authorized || permission == .limited else {
+                    throw ClipError.photoPermission
+                }
+                try Task.checkCancellation()
+                let urls = selected.map(\.url)
+                try await PHPhotoLibrary.shared().performChanges {
+                    for url in urls {
+                        PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+                    }
+                }
+                status = "Saved to Photos"
+            } catch {
+                status = "Your clips are ready"
+                if !Task.isCancelled { errorMessage = error.localizedDescription }
+            }
+        }
+    }
+
+    private func cleanUp() {
+        clips = []
+        if let workingDirectory { try? FileManager.default.removeItem(at: workingDirectory) }
+        workingDirectory = nil
+    }
+
+    private static func normalized(_ ranges: [CMTimeRange], within bounds: CMTimeRange) -> [CMTimeRange] {
+        let valid = ranges.filter { $0.isValid && !$0.isIndefinite }
+            .map { CMTimeRangeGetIntersection($0, otherRange: bounds) }
+            .filter { $0.start.seconds.isFinite && $0.duration.seconds.isFinite && $0.duration.seconds > 0 }
+            .sorted { $0.start < $1.start }
+        var merged: [CMTimeRange] = []
+        for range in valid {
+            if let last = merged.last, range.start <= last.end {
+                merged[merged.count - 1] = CMTimeRangeGetUnion(last, otherRange: range)
+            } else {
+                merged.append(range)
+            }
+        }
+        return merged
+    }
+}
+
+private enum ClipError: LocalizedError {
+    case importFailed, exportFailed, photoPermission
+    var errorDescription: String? {
+        switch self {
+        case .importFailed: "This video couldn't be loaded. If it's in iCloud, check your connection and try again."
+        case .exportFailed: "This video couldn't be exported. Try a different video."
+        case .photoPermission: "Allow ClipThing to add photos in Settings, or use Share to save your clips elsewhere."
+        }
+    }
+}
