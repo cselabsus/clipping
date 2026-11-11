@@ -3,6 +3,7 @@ import PhotosUI
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = HighlightModel()
     @State private var selection: PhotosPickerItem?
     @State private var preview: HighlightClip?
@@ -79,6 +80,10 @@ struct ContentView: View {
             }
             .onChange(of: model.isImporting) { _, importing in
                 if !importing { selection = nil }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                // Metal inference must finish before iOS suspends the app in the background.
+                if phase == .background { model.cancel() }
             }
             .sheet(item: $preview) { ClipPreview(clip: $0) }
             .alert("Couldn't finish", isPresented: Binding(

@@ -1,6 +1,5 @@
 import AVFoundation
 import CoreTransferable
-import MediaIntelligence
 import OSLog
 import Photos
 import PhotosUI
@@ -100,18 +99,18 @@ final class HighlightModel: ObservableObject {
                 guard !videoTracks.isEmpty else {
                     throw ClipError.importFailed
                 }
-                status = "Finding highlights…"
-                let asset = MediaIntelligenceVideoAsset(
-                    id: MediaIntelligenceVideoAsset.ID(UUID().uuidString),
-                    kind: .url(video.url)
-                )
-                let result = try await VideoAnalyzer.shared.analyze(asset, for: HighlightAnalysisRequest())
-                let analysis = try result.get()
-                try Task.checkCancellation()
                 let duration = try await source.load(.duration)
+                let highlights = try await LocalHighlightEngine.shared.highlights(in: video.url, duration: duration.seconds) {
+                    [weak self] message in
+                    await self?.updateAnalysisStatus(message)
+                }
+                try Task.checkCancellation()
                 let bounds = CMTimeRange(start: .zero, duration: duration)
                 // Clamp to the source and merge overlaps so the same footage isn't exported twice.
-                let ranges = Self.normalized(analysis.highlights, within: bounds)
+                let ranges = Self.normalized(highlights.map {
+                    CMTimeRange(start: CMTime(seconds: $0.start, preferredTimescale: 600),
+                                end: CMTime(seconds: $0.end, preferredTimescale: 600))
+                }, within: bounds)
                 guard !ranges.isEmpty else {
                     status = "No highlights found. Try another video."
                     cleanUp()
@@ -151,6 +150,11 @@ final class HighlightModel: ObservableObject {
         status = "Cancelling…"
         job?.cancel()
         // Keep the gate closed until the underlying operation has actually stopped.
+    }
+
+    private func updateAnalysisStatus(_ message: String) {
+        guard canCancel else { return } // Ignore progress after cancellation has been requested.
+        status = message
     }
 
     func save(_ selected: [HighlightClip]) {

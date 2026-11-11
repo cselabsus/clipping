@@ -1,0 +1,50 @@
+name: iOS build
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, subprocess
+          apps = list(pathlib.Path('/Applications').glob('Xcode_26*.app'))
+          if not apps:
+              raise SystemExit('Xcode 26 is required')
+          app = max(apps, key=lambda p: tuple(map(int, re.findall(r'\d+', p.name))))
+          subprocess.run(['sudo', 'xcode-select', '-s', str(app / 'Contents/Developer')], check=True)
+          PY
+          xcodebuild -version
+      - name: Test timestamp selection
+        run: |
+          swiftc ClipThing/HighlightPlan.swift Tests/HighlightPlanTests.swift -o "$RUNNER_TEMP/highlight-tests"
+          "$RUNNER_TEMP/highlight-tests"
+          python3 -m unittest discover -s Tests -p 'test_*.py'
+      - name: Build for iPhone
+        run: |
+          set -o pipefail
+          xcodebuild -project ClipThing.xcodeproj -scheme ClipThing -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/ClipThingBuild" \
+            CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/build.log" 2>&1 || { tail -150 "$RUNNER_TEMP/build.log"; exit 1; }
+          tail -5 "$RUNNER_TEMP/build.log"
+      - name: Check bundled model
+        run: |
+          python3 Scripts/prepare_model.py --verify-only
+          test -f "$RUNNER_TEMP/ClipThingBuild/Build/Products/Release-iphoneos/ClipThing.app/SmolVLM2/model.safetensors"
+          test -d "$RUNNER_TEMP/ClipThingBuild/Build/Products/Release-iphoneos/ClipThing.app/mlx-swift_Cmlx.bundle"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-build-log
+          path: ${{ runner.temp }}/build.log
