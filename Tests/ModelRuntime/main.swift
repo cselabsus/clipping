@@ -10,7 +10,9 @@ enum InferenceMemory {
     static func prefillChunkSize(maximum: Int) -> Int { maximum }
 }
 
-Device.setDefault(device: Device(.cpu))
+try Device.withDefaultDevice(.cpu) { try runChecks() }
+
+func runChecks() throws {
 let configuration = try JSONDecoder().decode(Idefics3Configuration.self, from: Data("""
 {
   "model_type":"smolvlm", "scale_factor":2, "image_token_id":31, "vocab_size":32,
@@ -57,3 +59,4 @@ for chunk in [1, 5, 128] {
     }
 }
 print("Sequential vision, chunked prefill, and cached decoding match upstream.")
+}
