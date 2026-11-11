@@ -3,9 +3,7 @@ DerivedData/
 build/
 xcuserdata/
 *.xcuserstate
-Models/SmolVLM2/*
-!Models/SmolVLM2/.gitkeep
-Models/.prepare-model.lock
-Models/.download-*
 __pycache__/
 .build/
+# Unused downloads from the previous bundled model.
+Models/

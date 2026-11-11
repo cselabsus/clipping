@@ -1,49 +1,27 @@
 # ClipThing
 
-A minimal SwiftUI app: choose a video, get suggested highlights, preview, save, or share. Analysis uses **SmolVLM2 2.2B, 4-bit**, bundled inside the app. No server, account, or API key.
+A minimal SwiftUI app: choose a video, get Apple's suggested highlights, preview, save, or share. Analysis uses MediaIntelligence on device. No bundled third-party model, server, account, or API key.
 
 ## Run
 
-1. On a Mac, open `ClipThing.xcodeproj` in **Xcode 26**.
-2. Choose your signing team and change the example bundle identifier to your own.
-3. Run on a real iPhone/iPad running **iOS 26+** with sufficient available app memory. Compatibility is based on the current process allowance, not a fixed physical-RAM cutoff. The 3,376 MB process limit reported on an iPhone 16 is lower than its physical RAM.
-4. The first build's **Prepare Bundled Model** step downloads approximately **1.46 GB** of weights plus configuration/tokenizer files. Allow time and disk space for the model, build products, and installed app. Subsequent builds reuse and verify these files.
+1. Open `ClipThing.xcodeproj` in **Xcode 27** on a Mac.
+2. Choose your signing team and bundle identifier.
+3. Run on an iPhone/iPad with **iOS 27+**, required by HighlightAnalysisRequest.
 
-No runtime model download, inference API, or video upload exists. The developer's first build needs internet; iCloud-only videos may also need downloading by Photos. Fully local videos can be analyzed offline. MLX inference cannot run in the iOS simulator.
-
-Model preparation uses Python 3 and curl. To prepare or verify manually:
-
-```sh
-python3 Scripts/prepare_model.py
-python3 Scripts/prepare_model.py --verify-only
-```
-
-Weights are excluded from Git. `Scripts/model-manifest.json` pins the model revision, byte sizes, and SHA-256 hashes. Downloads are serialized, verified, and atomically installed. A failed checksum stops the build. Do not commit model weights to GitHub.
+When upgrading from SmolVLM2, use Product > Clean Build Folder and reinstall the app to clear old build resources. Old ignored `Models/` downloads may still exist locally; the project no longer references or bundles them.
 
 ## Behavior
 
-- The system Photos picker imports only your selected video. iCloud-only videos may require a download.
-- Import requests the existing encoding and accepts QuickTime, MP4, and generic video file representations. The picker selection is retained until import finishes, and the temporary provider file is copied before its callback returns. Import failures include content-type diagnostics; no whole-video in-memory fallback is used.
-- Videos up to 10 minutes are processed in 12-second windows with 4 seconds of overlap, at 2 frames/second (at most 24 frames per prompt). Frames are encoded one at a time, retaining their compact embeddings so the model still sees the entire section together.
-- The video processor preserves orientation, converts to sRGB, resizes to 384x384, normalizes to [-1, 1], and attaches section-relative timestamps. It derives **81 image tokens per frame** from this checkpoint's geometry `(384 / 14 / 3)^2` using integer division. The library's default processor assumes 64, so this app prepares its own timestamped video inputs and validates token counts.
-- The prompt asks for complete events, including setup/action/outcome and throw/flight/catch/finish in sports. JSON timestamps and 1-5 event scores are strictly validated and offset to the original video. Only scores 4-5 enter final selection. Candidates are ranked by model score (a subjective ranking, not calibrated confidence). Only substantial raw overlap with the original event can join detections, with a 20-second padded clip cap; padding cannot join events or create an expanding chain. Up to three clips are selected, with a total budget of 35% of source duration, a 12-second minimum budget for short sources, and a 45-second maximum budget. A source shorter than 12 seconds can legitimately be one complete event. Padding is divided between neighboring events; export preserves separate clips. These limits prevent whole-video results on longer sources but do not establish highlight quality.
-- Malformed model output fails the job. An empty valid response means no highlights were selected. No fallback to Apple's scorer or arbitrary clips exists.
-- This is sampled visual analysis, not audio analysis or ball tracking. Small/fast objects can still be missed. Valid timestamps do not establish that a highlight is correct.
-- Clips export sequentially to temporary MOV files, using passthrough when supported to avoid unnecessary encoding. Preview/save/share become available when processing finishes.
-- The app uses a scoped adaptation of the pinned Idefics3 implementation (`MemoryEfficientIdefics3.swift`): float16 vision inputs, one materialized frame at a time, no unused vision hidden states, adaptive 32/64/128-token causal prefill chunks with the full KV history retained, and vocabulary logits only for the final position. Upstream ignores `prefillStepSize` and batches all frames, causing excessive peaks. Parameter names, checkpoint, frame rate, windows, and timeline semantics are unchanged.
-- Available process memory is checked before loading, between frames/prefill chunks, and during decoding. Chunk size is reconsidered after every chunk using the current allowance, preserving every prompt token and sampled frame. A 384 MiB reserve stops analysis with a recoverable error when detected; it is advisory, not an OS memory-limit guarantee. No increased-memory entitlement is required.
-- A shared actor owns inference across app windows. The model is scoped to one job and released before export; the MLX reuse cache is capped at 32 MB. Generation is bounded to 180 tokens at temperature zero, checks cancellation per token, and synchronizes GPU work before returning. Cancellation during model loading or a single frame/chunk may take time; the pipeline stays locked until work stops. Backgrounding cancels analysis. Saving to Photos is atomic.
-- Choosing another video deletes the previous temporary clips. Save clips you want to keep. Temporary files are not a permanent library; the OS may purge them.
-- Photos add-only access is requested only when saving. Sharing doesn't need that permission.
+- The Photos picker imports the selected video in its existing encoding. iCloud-only videos may need downloading. The provider file is copied before its callback returns.
+- One whole-video HighlightAnalysisRequest supplies Apple's highlight ranges. The app validates, clamps, sorts, and removes exact duplicates. It does not pad, merge overlapping suggestions, rank them with an LLM, or impose a 20-second cap. Apple's selection quality is not guaranteed to recognize a complete sports play.
+- A shared actor owns analysis across app windows. Cancellation keeps ownership until the outstanding request returns. Backgrounding cancels the job; export checks cancellation too.
+- Clips export sequentially as temporary MOV files, using passthrough when supported. Save or share clips to keep them; importing another video removes previous temporary clips.
+- Photos add-only permission is requested only when saving.
 
 ## Validation
 
-The GitHub Actions `iOS build` workflow compiles the app on macOS against the iPhone SDK and checks model bundling. A small CPU numerical test compares sequential vision, multiple prefill chunk sizes, and cached decoding against the pinned upstream model with identical weights. This checks math and cache continuity, not full-model device memory. Pure Swift tests cover window coverage, timestamp offsets, invalid outputs, bounds, bounded joining of a play across windows, ranking, separate padded events, and a 118-second all-sections-selected regression. Python tests check corrupt downloads and atomic installation.
+Pure Swift tests cover original boundaries, overlapping and touching clips, invalid ranges, clamping, duplicates, and preservation of a complete play longer than 20 seconds. CI uses the Xcode 27 runner to compile the real Apple API and verify that no model weights or MLX resource bundle ship.
 
-This Windows workspace cannot execute MLX or Xcode. Device inference, peak memory, and quality still need verification. The reduced-memory execution path has not yet been profiled against the reported 3,376 MB device limit. Test the 45-second touchdown video and confirm the exported clip includes throw, flight, catch, and finish. Also test local/iCloud import, airplane mode with local media, portrait/HDR videos, cancellation followed by another import, denied Photos access, saving/sharing, and long-video memory usage. A successful build does not establish model accuracy.
+This Windows workspace cannot run Xcode or device analysis. Device testing must still establish highlight quality, latency, local/iCloud import, cancellation, portrait/HDR handling, and saving/sharing. No Vision or Foundation Models refinement has been added yet.
 
-## Pinned components
-
-- [SmolVLM2 2.2B 4-bit MLX](https://huggingface.co/smdesai/SmolVLM2-2.2B-Instruct-4bit), revision `0a4ab666f99095e6c6bd0e1e49aca8822fc46df2` (Apache-2.0).
-- [MLX Swift LM](https://github.com/ml-explore/mlx-swift-lm/tree/2.29.3) 2.29.3; MLX Swift 0.29.1; Swift Transformers 1.1.6.
-- License texts and redistribution notices are in `ThirdPartyNotices.txt`, also bundled in the app.
+Reference: [Apple video highlights](https://developer.apple.com/documentation/mediaintelligence/finding-the-best-moments-in-a-video).

@@ -84,7 +84,7 @@ struct ContentView: View {
                 if !importing { selection = nil }
             }
             .onChange(of: scenePhase) { _, phase in
-                // Metal inference must finish before iOS suspends the app in the background.
+                // Cancel analysis when backgrounded; retain the job gate until it actually stops.
                 if phase == .background { model.cancel() }
             }
             .sheet(item: $preview) { ClipPreview(clip: $0) }

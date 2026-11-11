@@ -100,7 +100,7 @@ final class HighlightModel: ObservableObject {
                     throw ClipError.importFailed
                 }
                 let duration = try await source.load(.duration)
-                let highlights = try await LocalHighlightEngine.shared.highlights(in: video.url, duration: duration.seconds) {
+                let highlights = try await AppleHighlightEngine.shared.highlights(in: video.url, duration: duration.seconds) {
                     [weak self] message in
                     await self?.updateAnalysisStatus(message)
                 }
