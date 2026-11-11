@@ -9,10 +9,12 @@ struct ContentView: View {
     @State private var preview: HighlightClip?
 
     var body: some View {
-        NavigationStack {
+        // PhotosPicker's label can be Sendable. Capture a value, not the main-actor model.
+        let pickerTitle = model.clips.isEmpty ? "Choose Video" : "Choose Another Video"
+        return NavigationStack {
             VStack(spacing: 20) {
                 PhotosPicker(selection: $selection, matching: .videos, preferredItemEncoding: .current) {
-                    Label(model.clips.isEmpty ? "Choose Video" : "Choose Another Video", systemImage: "video.badge.plus")
+                    Label(pickerTitle, systemImage: "video.badge.plus")
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
                 }
