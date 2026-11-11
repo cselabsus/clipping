@@ -696,4 +696,3 @@ final class MemoryEfficientIdefics3: Module, VLMModel, KVCacheDimensionProvider 
         return final
     }
 }
-
