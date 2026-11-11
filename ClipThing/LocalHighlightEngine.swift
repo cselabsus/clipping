@@ -44,7 +44,7 @@ actor LocalHighlightEngine {
         let configuration = ModelConfiguration(directory: directory, extraEOSTokens: ["<end_of_utterance>"])
         // A private registry avoids changing shared factory behavior or racing another loader.
         let factory = VLMModelFactory(typeRegistry: ModelTypeRegistry(creators: [
-            "idefics3": { url in
+            "smolvlm": { url in
                 let config = try JSONDecoder().decode(Idefics3Configuration.self,
                     from: Data(contentsOf: url))
                 return MemoryEfficientIdefics3(config)

@@ -38,6 +38,12 @@ jobs:
             -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/ClipThingBuild" \
             CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/build.log" 2>&1 || { tail -150 "$RUNNER_TEMP/build.log"; exit 1; }
           tail -5 "$RUNNER_TEMP/build.log"
+      - name: Check bounded inference against upstream
+        run: |
+          mkdir -p "$RUNNER_TEMP/ModelRuntime"
+          cp Tests/ModelRuntime/Package.swift Tests/ModelRuntime/main.swift "$RUNNER_TEMP/ModelRuntime/"
+          cp ClipThing/MemoryEfficientIdefics3.swift "$RUNNER_TEMP/ModelRuntime/"
+          swift run -c release --package-path "$RUNNER_TEMP/ModelRuntime" ModelRuntimeChecks
       - name: Check bundled model
         run: |
           python3 Scripts/prepare_model.py --verify-only
