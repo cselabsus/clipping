@@ -7,6 +7,7 @@ import MLXVLM
 // The CI executable tests math on tiny tensors, not iOS memory policy.
 enum InferenceMemory {
     static func checkHeadroom() throws { }
+    static func prefillChunkSize(maximum: Int) -> Int { maximum }
 }
 
 Device.setDefault(device: Device(.cpu))

@@ -24,10 +24,6 @@ actor LocalHighlightEngine {
         throw EngineError.simulator
         #else
         guard MTLCreateSystemDefaultDevice() != nil else { throw EngineError.unsupportedDevice }
-        // A conservative app guard, not a claim that all 6 GB devices have been validated.
-        guard ProcessInfo.processInfo.physicalMemory >= 6_000_000_000 else {
-            throw EngineError.insufficientMemory
-        }
         guard let directory = Bundle.main.resourceURL?.appendingPathComponent("SmolVLM2"),
               FileManager.default.fileExists(atPath: directory.appendingPathComponent("model.safetensors").path) else {
             throw EngineError.missingModel
@@ -173,6 +169,15 @@ enum InferenceMemory {
     // bounded unit of work; physical RAM does not describe the app's jetsam allowance.
     static var isLow: Bool { os_proc_available_memory() < 384 * 1024 * 1024 }
 
+    static func prefillChunkSize(maximum: Int) -> Int {
+        // Reconsider each chunk: the KV cache grows as the section is consumed,
+        // and iOS may change the process allowance while analysis is running.
+        let available = os_proc_available_memory()
+        let size = available >= 1_024 * 1024 * 1024 ? 128
+            : available >= 640 * 1024 * 1024 ? 64 : 32
+        return max(1, min(maximum, size))
+    }
+
     static func checkHeadroom(required: Int = 384 * 1024 * 1024) throws {
         guard os_proc_available_memory() >= required else { throw PressureError() }
     }
@@ -185,13 +190,12 @@ enum InferenceMemory {
 }
 
 private enum EngineError: LocalizedError {
-    case alreadyRunning, simulator, unsupportedDevice, insufficientMemory, missingModel, modelMismatch
+    case alreadyRunning, simulator, unsupportedDevice, missingModel, modelMismatch
     var errorDescription: String? {
         switch self {
         case .alreadyRunning: "Another video is being analyzed. Wait for it to finish."
         case .simulator: "On-device analysis requires a real iPhone or iPad. MLX cannot run in the simulator."
         case .unsupportedDevice: "This device doesn't support the model's Metal GPU runtime."
-        case .insufficientMemory: "This model needs a device with at least 6 GB of RAM."
         case .missingModel: "The bundled model is missing. Rebuild the app with the Prepare Model build step enabled."
         case .modelMismatch: "The bundled model and video processor don't match. Rebuild the app to restore the pinned model."
         }

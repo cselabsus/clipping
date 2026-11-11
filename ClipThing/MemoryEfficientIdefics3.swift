@@ -639,18 +639,22 @@ final class MemoryEfficientIdefics3: Module, VLMModel, KVCacheDimensionProvider 
         eval(embeddings)
         // Honor the prefill bound while retaining the full causal KV history.
         // The pinned upstream implementation ignores windowSize and prefills everything.
-        let chunkSize = max(1, min(windowSize ?? 128, 128))
+        let maximumChunkSize = max(1, min(windowSize ?? 128, 128))
         var result: LMOutput?
-        for start in stride(from: 0, to: embeddings.dim(1), by: chunkSize) {
+        var start = 0
+        while start < embeddings.dim(1) {
             try Task.checkCancellation()
             try InferenceMemory.checkHeadroom()
+            let chunkSize = InferenceMemory.prefillChunkSize(maximum: maximumChunkSize)
             let end = min(start + chunkSize, embeddings.dim(1))
-            result = languageModel(nil, cache: cache,
+            let chunk = languageModel(nil, cache: cache,
                 inputs_embeds: embeddings[0..., start..<end], lastLogitOnly: true)
-            eval(result!.logits)
+            eval(chunk.logits)
             // Force every layer's updated cache before discarding this chunk's graph.
             eval(cache.flatMap { $0.state })
             GPU.clearCache()
+            result = chunk
+            start = end
         }
         guard let result else { throw VLMError.processing("The video prompt is empty.") }
         return .logits(result)
