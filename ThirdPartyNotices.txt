@@ -1,3 +1,8 @@
+Local source adaptation: ClipThing/MemoryEfficientIdefics3.swift derives from
+ml-explore/mlx-swift-lm 2.29.3 Libraries/MLXVLM/Models/Idefics3.swift.
+Modified for sequential vision encoding and bounded prefill. The MLX Swift LM
+MIT notice below applies to this source as well as the dependency.
+
 ClipThing third-party notices
 
 Model: https://huggingface.co/smdesai/SmolVLM2-2.2B-Instruct-4bit

@@ -5,6 +5,7 @@ import Metal
 import MLX
 import MLXLMCommon
 import MLXVLM
+import os
 
 /// One process-wide inference owner, including across multiple app windows.
 actor LocalHighlightEngine {
@@ -34,9 +35,22 @@ actor LocalHighlightEngine {
         try Task.checkCancellation()
         await progress("Loading on-device model…")
         GPU.set(cacheLimit: 32 * 1024 * 1024)
+        defer {
+            Stream().synchronize()
+            GPU.clearCache()
+        }
+        try InferenceMemory.checkHeadroom(required: 2_000 * 1024 * 1024)
         // Local directory loading also keeps the tokenizer offline; never pass a Hub model ID here.
         let configuration = ModelConfiguration(directory: directory, extraEOSTokens: ["<end_of_utterance>"])
-        let container = try await VLMModelFactory.shared.loadContainer(configuration: configuration)
+        // A private registry avoids changing shared factory behavior or racing another loader.
+        let factory = VLMModelFactory(typeRegistry: ModelTypeRegistry(creators: [
+            "idefics3": { url in
+                let config = try JSONDecoder().decode(Idefics3Configuration.self,
+                    from: Data(contentsOf: url))
+                return MemoryEfficientIdefics3(config)
+            }
+        ]), processorRegistry: VLMProcessorTypeRegistry.shared, modelRegistry: VLMRegistry.shared)
+        let container = try await factory.loadContainer(configuration: configuration)
         let geometry = try VideoModelGeometry(directory: directory)
         var candidates: [HighlightSpan] = []
         for (index, window) in windows.enumerated() {
@@ -46,14 +60,17 @@ actor LocalHighlightEngine {
                 let input = try await TimestampedVideoInput.prepare(
                     url: url, window: window, geometry: geometry, context: context)
                 try Task.checkCancellation()
-                let parameters = GenerateParameters(maxTokens: 180, temperature: 0, prefillStepSize: 256)
+                let parameters = GenerateParameters(maxTokens: 180, temperature: 0, prefillStepSize: 128)
+                var lowMemory = false
                 // The synchronous visitor stays in this task and synchronizes the GPU before returning.
                 // Unlike an unstructured streaming producer, cancellation cannot leave generation running.
                 let result = try MLXLMCommon.generate(input: input, parameters: parameters, context: context) {
                     (tokens: [Int]) in
-                    Task.isCancelled || tokens.count >= 180 ? .stop : .more
+                    lowMemory = InferenceMemory.isLow
+                    return Task.isCancelled || lowMemory || tokens.count >= 180 ? .stop : .more
                 }
                 try Task.checkCancellation()
+                if lowMemory { throw InferenceMemory.PressureError() }
                 return result.output
             }
             candidates += try HighlightPlan.parse(output, window: window)
@@ -119,7 +136,7 @@ private enum TimestampedVideoInput {
                     bounds: CGRect(x: 0, y: 0, width: edge, height: edge), format: .RGBA8, colorSpace: colorSpace)
             }
             let rgba = MLXArray(bytes, [1, edge, edge, 4])
-            let rgb = rgba[0..., 0..., 0..., ..<3].asType(.float32) / 127.5 - 1
+            let rgb = (rgba[0..., 0..., 0..., ..<3].asType(.float32) / 127.5 - 1).asType(.float16)
             eval(rgb)
             frames.append(rgb)
             let timestamp = String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), relative)
@@ -148,6 +165,22 @@ private enum TimestampedVideoInput {
         let tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
         return LMInput(text: .init(tokens: tokenArray, mask: ones(like: tokenArray)),
             image: .init(pixels: concatenated(frames, axis: 0)))
+    }
+}
+
+enum InferenceMemory {
+    // Advisory reserve, not a guaranteed peak-memory prediction. Check afresh at each
+    // bounded unit of work; physical RAM does not describe the app's jetsam allowance.
+    static var isLow: Bool { os_proc_available_memory() < 384 * 1024 * 1024 }
+
+    static func checkHeadroom(required: Int = 384 * 1024 * 1024) throws {
+        guard os_proc_available_memory() >= required else { throw PressureError() }
+    }
+
+    struct PressureError: LocalizedError {
+        var errorDescription: String? {
+            "There isn't enough app memory to finish on-device analysis safely. Try again after closing other apps. This model may be too large for this device."
+        }
     }
 }
 
