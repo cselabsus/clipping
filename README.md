@@ -13,6 +13,7 @@ Apple documents `VideoAnalyzer` and `HighlightAnalysisRequest` as iOS 27+ APIs. 
 ## Behavior
 
 - The system Photos picker imports only your selected video. iCloud-only videos may require a download.
+- Import requests the existing encoding and accepts QuickTime, MP4, and generic video file representations. The picker selection is retained until import finishes, and the temporary provider file is copied before its callback returns. Import failures include content-type diagnostics; no whole-video in-memory fallback is used.
 - Apple's Media Intelligence selects highlight time ranges locally. Overlapping ranges are merged and clipped to the source duration.
 - Clips export sequentially to temporary MOV files, using passthrough when supported to avoid unnecessary encoding. Preview/save/share become available when processing finishes.
 - One operation owns the pipeline at a time. Cancellation keeps the pipeline locked until work stops; saving to Photos is an atomic operation without a cancel button.

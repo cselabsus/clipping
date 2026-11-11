@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreTransferable
 import MediaIntelligence
+import OSLog
 import Photos
 import PhotosUI
 import SwiftUI
@@ -10,19 +11,38 @@ struct ImportedVideo: Transferable, Sendable {
     let url: URL
 
     static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .quickTimeMovie) { received in
+            try copyVideo(received.file)
+        }
+        FileRepresentation(importedContentType: .mpeg4Movie) { received in
+            try copyVideo(received.file)
+        }
         FileRepresentation(importedContentType: .movie) { received in
-            let directory = FileManager.default.temporaryDirectory
-                .appendingPathComponent("ClipThing-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let destination = directory.appendingPathComponent("source")
-                .appendingPathExtension(received.file.pathExtension)
-            do {
-                try FileManager.default.copyItem(at: received.file, to: destination)
-                return ImportedVideo(url: destination)
-            } catch {
-                try? FileManager.default.removeItem(at: directory)
-                throw error
-            }
+            try copyVideo(received.file)
+        }
+        FileRepresentation(importedContentType: .video) { received in
+            try copyVideo(received.file)
+        }
+        FileRepresentation(importedContentType: .audiovisualContent) { received in
+            try copyVideo(received.file)
+        }
+    }
+
+    private static func copyVideo(_ source: URL) throws -> ImportedVideo {
+        try Task.checkCancellation()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ClipThing-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent("source")
+            .appendingPathExtension(source.pathExtension)
+        do {
+            // The provider's URL is temporary: copy it before returning from its callback.
+            try FileManager.default.copyItem(at: source, to: destination)
+            try Task.checkCancellation()
+            return ImportedVideo(url: destination)
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
         }
     }
 }
@@ -39,11 +59,13 @@ final class HighlightModel: ObservableObject {
     @Published private(set) var clips: [HighlightClip] = []
     @Published private(set) var isBusy = false
     @Published private(set) var canCancel = false
+    @Published private(set) var isImporting = false
     @Published private(set) var status = "Choose a video. Get its best moments."
     @Published var errorMessage: String?
 
     private var job: Task<Void, Never>?
     private var workingDirectory: URL?
+    private let logger = Logger(subsystem: "ClipThing", category: "VideoImport")
 
     func process(_ selection: PhotosPickerItem) {
         guard !isBusy else { return }
@@ -51,15 +73,33 @@ final class HighlightModel: ObservableObject {
         errorMessage = nil
         isBusy = true
         canCancel = true
+        isImporting = true
         status = "Loading video…"
         job = Task {
-            defer { isBusy = false; canCancel = false; job = nil }
+            defer { isImporting = false; isBusy = false; canCancel = false; job = nil }
             do {
-                guard let video = try await selection.loadTransferable(type: ImportedVideo.self) else {
-                    throw ClipError.importFailed
+                let video: ImportedVideo
+                do {
+                    guard let imported = try await selection.loadTransferable(type: ImportedVideo.self) else {
+                        throw ClipError.importFailed
+                    }
+                    video = imported
+                } catch {
+                    if Task.isCancelled || error is CancellationError { throw CancellationError() }
+                    let types = selection.supportedContentTypes.map(\.identifier).joined(separator: ", ")
+                    let failure = error as NSError
+                    logger.error("Import failed. Types: \(types, privacy: .public). Error: \(failure.domain, privacy: .public) (\(failure.code)): \(failure.localizedDescription, privacy: .private)")
+                    throw ClipError.transferFailed(details: "\(failure.domain) (\(failure.code)); types: \(types)")
                 }
                 workingDirectory = video.url.deletingLastPathComponent()
+                isImporting = false
                 try Task.checkCancellation()
+                let source = AVURLAsset(url: video.url)
+                let videoTracks = try await source.loadTracks(withMediaType: .video)
+                try Task.checkCancellation()
+                guard !videoTracks.isEmpty else {
+                    throw ClipError.importFailed
+                }
                 status = "Finding highlights…"
                 let asset = MediaIntelligenceVideoAsset(
                     id: MediaIntelligenceVideoAsset.ID(UUID().uuidString),
@@ -68,7 +108,6 @@ final class HighlightModel: ObservableObject {
                 let result = try await VideoAnalyzer.shared.analyze(asset, for: HighlightAnalysisRequest())
                 let analysis = try result.get()
                 try Task.checkCancellation()
-                let source = AVURLAsset(url: video.url)
                 let duration = try await source.load(.duration)
                 let bounds = CMTimeRange(start: .zero, duration: duration)
                 // Clamp to the source and merge overlaps so the same footage isn't exported twice.
@@ -165,9 +204,11 @@ final class HighlightModel: ObservableObject {
 
 private enum ClipError: LocalizedError {
     case importFailed, exportFailed, photoPermission
+    case transferFailed(details: String)
     var errorDescription: String? {
         switch self {
         case .importFailed: "This video couldn't be loaded. If it's in iCloud, check your connection and try again."
+        case .transferFailed(let details): "Photos couldn't provide this video. Open it in Photos and let it download fully, then try again.\n\nImport details: \(details)"
         case .exportFailed: "This video couldn't be exported. Try a different video."
         case .photoPermission: "Allow ClipThing to add photos in Settings, or use Share to save your clips elsewhere."
         }

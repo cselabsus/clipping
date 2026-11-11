@@ -10,7 +10,7 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 20) {
-                PhotosPicker(selection: $selection, matching: .videos) {
+                PhotosPicker(selection: $selection, matching: .videos, preferredItemEncoding: .current) {
                     Label(model.clips.isEmpty ? "Choose Video" : "Choose Another Video", systemImage: "video.badge.plus")
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
@@ -76,7 +76,9 @@ struct ContentView: View {
             .onChange(of: selection) { _, item in
                 guard let item else { return }
                 model.process(item)
-                selection = nil
+            }
+            .onChange(of: model.isImporting) { _, importing in
+                if !importing { selection = nil }
             }
             .sheet(item: $preview) { ClipPreview(clip: $0) }
             .alert("Couldn't finish", isPresented: Binding(
