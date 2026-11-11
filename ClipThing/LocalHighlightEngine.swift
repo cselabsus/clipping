@@ -48,7 +48,7 @@ actor LocalHighlightEngine {
         ]), processorRegistry: VLMProcessorTypeRegistry.shared, modelRegistry: VLMRegistry.shared)
         let container = try await factory.loadContainer(configuration: configuration)
         let geometry = try VideoModelGeometry(directory: directory)
-        var candidates: [HighlightSpan] = []
+        var candidates: [HighlightCandidate] = []
         for (index, window) in windows.enumerated() {
             try Task.checkCancellation()
             await progress("Watching section \(index + 1) of \(windows.count)…")
@@ -74,7 +74,8 @@ actor LocalHighlightEngine {
         }
         try Task.checkCancellation()
         // Container is local to this job; weights are released before export/preview.
-        return HighlightPlan.merge(candidates, duration: duration)
+        await progress("Selecting the best moments...")
+        return HighlightPlan.select(candidates, duration: duration)
         #endif
     }
 }
@@ -142,12 +143,16 @@ private enum TimestampedVideoInput {
         }
         let sectionLength = String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), window.duration)
         let instructions = """
-        Select meaningful action worth keeping from this \(sectionLength)-second section.
+        Select only distinct standout events worth keeping from this \(sectionLength)-second section.
         Preserve complete events, including setup, action, and outcome. In sports keep the throw,
         ball flight, catch, and finish together. Do not select only celebrations or spectators.
         If an interesting action is already happening at the start, start at 0. If still happening
         at the end, end at \(sectionLength). Select up to 3 intervals; use an empty array if none.
-        Return ONLY JSON: {"highlights":[{"start":0.0,"end":5.0}]}
+        Do not select the entire section just because something is moving. Exclude waiting,
+        routine movement, and uneventful footage. Score each event on the same 1-5 scale:
+        1 routine, 2 mildly interesting, 3 interesting, 4 clearly notable, 5 exceptional.
+        These scores rank events across the whole video. An empty array is better than filler.
+        Return ONLY JSON: {"highlights":[{"start":0.0,"end":5.0,"score":4}]}
         Replace the example with observed times in seconds relative to THIS section, between 0
         and \(sectionLength). Do not use timestamps from any other video or add explanations.
         """

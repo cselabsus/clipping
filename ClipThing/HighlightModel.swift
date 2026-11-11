@@ -106,7 +106,8 @@ final class HighlightModel: ObservableObject {
                 }
                 try Task.checkCancellation()
                 let bounds = CMTimeRange(start: .zero, duration: duration)
-                // Clamp to the source and merge overlaps so the same footage isn't exported twice.
+                // Clamp only: selection already owns event boundaries and duplicate removal.
+                // Re-merging here would undo the selector and join separate highlights.
                 let ranges = Self.normalized(highlights.map {
                     CMTimeRange(start: CMTime(seconds: $0.start, preferredTimescale: 600),
                                 end: CMTime(seconds: $0.end, preferredTimescale: 600))
@@ -190,19 +191,10 @@ final class HighlightModel: ObservableObject {
     }
 
     private static func normalized(_ ranges: [CMTimeRange], within bounds: CMTimeRange) -> [CMTimeRange] {
-        let valid = ranges.filter { $0.isValid && !$0.isIndefinite }
+        ranges.filter { $0.isValid && !$0.isIndefinite }
             .map { CMTimeRangeGetIntersection($0, otherRange: bounds) }
             .filter { $0.start.seconds.isFinite && $0.duration.seconds.isFinite && $0.duration.seconds > 0 }
             .sorted { $0.start < $1.start }
-        var merged: [CMTimeRange] = []
-        for range in valid {
-            if let last = merged.last, range.start <= last.end {
-                merged[merged.count - 1] = CMTimeRangeGetUnion(last, otherRange: range)
-            } else {
-                merged.append(range)
-            }
-        }
-        return merged
     }
 }
 
